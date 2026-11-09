@@ -11,7 +11,10 @@ from flask import (Flask, abort, flash, g, redirect, render_template, request,
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get("WORKLIST_DATA", os.path.join(BASE_DIR, "data"))
+# บน Vercel เขียนไฟล์ได้เฉพาะ /tmp (และข้อมูลใน /tmp ไม่ถาวร — ดู README หัวข้อ Vercel)
+ON_VERCEL = bool(os.environ.get("VERCEL"))
+DATA_DIR = os.environ.get("WORKLIST_DATA") or (
+    "/tmp/worklist" if ON_VERCEL else os.path.join(BASE_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "worklist.db")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 ALLOWED_EXT = {"jpg", "jpeg", "png", "gif", "webp", "heic", "heif"}
