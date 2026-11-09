@@ -1,30 +1,44 @@
-"""Worklist — ระบบมอบหมายและตรวจเช็คงาน (Flask + SQLite)"""
+"""Worklist — ระบบมอบหมายและตรวจเช็คงาน (Flask + MongoDB)"""
+import atexit
 import os
 import secrets
-import sqlite3
 import uuid
 from datetime import datetime
 from functools import wraps
 
 from flask import (Flask, Response, abort, flash, g, redirect, render_template, request,
-                   send_from_directory, session, url_for)
+                   session, url_for)
+from pymongo import ASCENDING, MongoClient, ReturnDocument
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# ฐานข้อมูล: ถ้ามี DATABASE_URL (เช่น Neon/Vercel Postgres) จะใช้ Postgres ไม่งั้นใช้ SQLite ในโฟลเดอร์ data/
-DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
-USE_PG = bool(DATABASE_URL)
-# บน Vercel เขียนไฟล์ได้เฉพาะ /tmp และไม่ถาวร — ใช้งานจริงบน Vercel ต้องตั้ง DATABASE_URL
+
+
+def _load_dotenv():
+    """อ่านไฟล์ .env (ถ้ามี) สำหรับรันในเครื่อง — ไฟล์นี้ไม่ถูก push ขึ้น GitHub (.gitignore)"""
+    path = os.path.join(BASE_DIR, ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+
+# ฐานข้อมูล MongoDB: ตั้ง MONGODB_URI ใน Vercel (Settings → Environment Variables) หรือในไฟล์ .env
+MONGODB_URI = os.environ.get("MONGODB_URI")
+MONGODB_DB = os.environ.get("MONGODB_DB", "worklist")
 ON_VERCEL = bool(os.environ.get("VERCEL"))
-DATA_DIR = os.environ.get("WORKLIST_DATA") or (
-    "/tmp/worklist" if ON_VERCEL else os.path.join(BASE_DIR, "data"))
-DB_PATH = os.path.join(DATA_DIR, "worklist.db")
-UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")  # ใช้กับรูปเก่าที่เก็บเป็นไฟล์ (ก่อนเก็บรูปในฐานข้อมูล)
+# Vercel รับข้อมูลได้ไม่เกิน 4.5 MB ต่อคำขอ (เบราว์เซอร์ย่อรูปก่อนส่งให้อยู่แล้ว)
+UPLOAD_LIMIT_MB = int(os.environ.get("UPLOAD_LIMIT_MB", 4 if ON_VERCEL else 60))
+MAX_PHOTO_BYTES = 15 * 1024 * 1024  # เอกสาร MongoDB ใหญ่ได้ไม่เกิน 16 MB
 ALLOWED_EXT = {"jpg", "jpeg", "png", "gif", "webp", "heic", "heif"}
 MIME = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
         "webp": "image/webp", "heic": "image/heic", "heif": "image/heif"}
-# Vercel รับข้อมูลได้ไม่เกิน 4.5 MB ต่อคำขอ (เบราว์เซอร์จะย่อรูปก่อนส่งให้อยู่แล้ว)
-UPLOAD_LIMIT_MB = 4 if ON_VERCEL else 60
 
 ROLES = {"employer": "นายจ้าง", "employee": "ลูกจ้าง"}
 STATUSES = {
@@ -37,149 +51,69 @@ STATUSES = {
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = UPLOAD_LIMIT_MB * 1024 * 1024
 
-USERS_TABLE = """
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('employer', 'employee')),
-    created_at TEXT NOT NULL
-);
-"""
-
-TASKS_TABLE = """
-CREATE TABLE IF NOT EXISTS {name} (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    location TEXT NOT NULL DEFAULT '',
-    -- NULL = มอบหมายให้ทุกคน: ลูกจ้างทุกคนเห็น และคนแรกที่กด "รับงาน" จะได้งานนี้ไปคนเดียว
-    assigned_to INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    due_date TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    employee_note TEXT NOT NULL DEFAULT '',
-    feedback TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    submitted_at TEXT,
-    reviewed_at TEXT,
-    archived INTEGER NOT NULL DEFAULT 0  -- 1 = นำออกจากแท็บรายการงานแล้ว (ยังอยู่ในรายการงานทั้งหมด)
-);
-"""
-
-PHOTOS_TABLE = """
-CREATE TABLE IF NOT EXISTS photos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    filename TEXT NOT NULL,
-    uploaded_at TEXT NOT NULL,
-    mime TEXT,
-    data BLOB  -- ตัวรูป (เก็บในฐานข้อมูล เพื่อให้ใช้บน Vercel ได้) ; NULL = รูปเก่าที่เก็บเป็นไฟล์
-);
-"""
-
-SETTINGS_TABLE = """
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-"""
-
-
-def _pg_sql(sql):
-    """แปลง SQL แบบ SQLite ให้ใช้กับ Postgres ได้"""
-    return (sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-               .replace(" BLOB", " BYTEA"))
-
-
 # ---------------------------------------------------------------- database
-class Database:
-    """ตัวกลางเล็ก ๆ ให้โค้ดเดียวกันใช้ได้ทั้ง SQLite และ Postgres (ใช้ ? เป็น placeholder ได้ทั้งคู่)"""
-
-    def __init__(self):
-        if USE_PG:
-            import psycopg
-            from psycopg.rows import dict_row
-            self.conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
-        else:
-            self.conn = sqlite3.connect(DB_PATH)
-            self.conn.row_factory = sqlite3.Row
-            self.conn.execute("PRAGMA foreign_keys = ON")
-
-    def execute(self, sql, params=()):
-        if USE_PG:
-            sql = sql.replace("?", "%s")
-        return self.conn.execute(sql, params)
-
-    def commit(self):
-        self.conn.commit()
-
-    def close(self):
-        self.conn.close()
+# collections:
+#   users    {_id:int, username, password_hash, name, role, created_at}
+#   tasks    {_id:int, title, description, location, assigned_to:int|None (None = ทุกคน ยังไม่มีคนรับ),
+#             created_by, due_date, status, employee_note, feedback, created_at, submitted_at,
+#             reviewed_at, archived:0|1}
+#   photos   {_id:int, task_id, filename, uploaded_at, mime, data:bytes}
+#   counters {_id:"users"|"tasks"|"photos", seq}   — ใช้ทำเลข id เรียงกัน (ใช้ใน URL)
+#   settings {_id:"secret_key", value}
+_client = None
 
 
-def db():
-    if "db" not in g:
-        g.db = Database()
-    return g.db
+def mongo():
+    global _client
+    if not MONGODB_URI:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า MONGODB_URI (ใส่ใน Vercel → Settings → Environment Variables "
+                           "หรือในไฟล์ .env ตอนรันในเครื่อง)")
+    if _client is None:  # ใช้ client เดียวทั้งแอป (pymongo จัดการ connection pool ให้)
+        _client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=8000)
+        atexit.register(_client.close)
+    return _client.get_default_database(default=MONGODB_DB)
 
 
-@app.teardown_appcontext
-def close_db(_exc):
-    conn = g.pop("db", None)
-    if conn is not None:
-        conn.close()
+def next_id(name):
+    doc = mongo().counters.find_one_and_update(
+        {"_id": name}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER)
+    return doc["seq"]
 
 
-TASK_COLS = ("id, title, description, location, assigned_to, created_by, due_date, status, "
-             "employee_note, feedback, created_at, submitted_at, reviewed_at, archived")
+def with_id(doc):
+    """ให้ template ใช้ .id ได้เหมือนเดิม"""
+    if doc is not None:
+        doc["id"] = doc["_id"]
+    return doc
+
+
+def user_names():
+    return {u["_id"]: u["name"] for u in mongo().users.find({}, {"name": 1})}
+
+
+def photo_counts(task_ids):
+    rows = mongo().photos.aggregate([
+        {"$match": {"task_id": {"$in": list(task_ids)}}},
+        {"$group": {"_id": "$task_id", "n": {"$sum": 1}}},
+    ])
+    return {r["_id"]: r["n"] for r in rows}
 
 
 def init_db():
-    if USE_PG:
-        import psycopg
-        with psycopg.connect(DATABASE_URL) as conn:
-            conn.execute(_pg_sql(USERS_TABLE + TASKS_TABLE.format(name="tasks") + PHOTOS_TABLE + SETTINGS_TABLE))
-        return
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript(USERS_TABLE + TASKS_TABLE.format(name="tasks") + PHOTOS_TABLE + SETTINGS_TABLE)
-        # migration: เพิ่มคอลัมน์ให้ฐานข้อมูลเดิมที่สร้างก่อนมีฟีเจอร์นั้น
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-        if "location" not in cols:
-            conn.execute("ALTER TABLE tasks ADD COLUMN location TEXT NOT NULL DEFAULT ''")
-        if "archived" not in cols:
-            conn.execute("ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
-        photo_cols = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
-        if "data" not in photo_cols:
-            conn.execute("ALTER TABLE photos ADD COLUMN mime TEXT")
-            conn.execute("ALTER TABLE photos ADD COLUMN data BLOB")
-        # migration: ฐานข้อมูลเดิมบังคับ assigned_to NOT NULL -> สร้างตารางใหม่ให้รองรับ "ทุกคน"
-        notnull = {r[1]: r[3] for r in conn.execute("PRAGMA table_info(tasks)")}
-        if notnull.get("assigned_to"):
-            conn.commit()
-            conn.execute("PRAGMA foreign_keys = OFF")
-            conn.executescript(
-                "BEGIN;"
-                + TASKS_TABLE.format(name="tasks_new")
-                + f"INSERT INTO tasks_new ({TASK_COLS}) SELECT {TASK_COLS} FROM tasks;"
-                "DROP TABLE tasks; ALTER TABLE tasks_new RENAME TO tasks; COMMIT;"
-            )
+    d = mongo()
+    d.users.create_index([("username", ASCENDING)], unique=True)
+    d.tasks.create_index([("assigned_to", ASCENDING)])
+    d.photos.create_index([("task_id", ASCENDING)])
 
 
 def _secret_key():
     """ใช้ SECRET_KEY จาก env ถ้ามี ไม่งั้นสร้างครั้งเดียวแล้วเก็บไว้ในฐานข้อมูล (ทุกเครื่องบน Vercel ใช้ค่าเดียวกัน)"""
     if os.environ.get("SECRET_KEY"):
         return os.environ["SECRET_KEY"]
-    d = Database()
-    try:
-        d.execute("INSERT INTO settings (key, value) VALUES ('secret_key', ?) ON CONFLICT (key) DO NOTHING",
-                  (secrets.token_hex(32),))
-        d.commit()
-        return d.execute("SELECT value FROM settings WHERE key = 'secret_key'").fetchone()["value"]
-    finally:
-        d.close()
+    doc = mongo().settings.find_one_and_update(
+        {"_id": "secret_key"}, {"$setOnInsert": {"value": secrets.token_hex(32)}},
+        upsert=True, return_document=ReturnDocument.AFTER)
+    return doc["value"]
 
 
 def now():
@@ -190,7 +124,7 @@ def now():
 def current_user():
     if "user" not in g:
         uid = session.get("user_id")
-        g.user = db().execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone() if uid else None
+        g.user = with_id(mongo().users.find_one({"_id": uid})) if uid else None
     return g.user
 
 
@@ -225,23 +159,21 @@ def inject_globals():
 
 
 def fetch_task(task_id):
-    task = db().execute(
-        """SELECT t.*, u.name AS assignee_name, c.name AS creator_name
-           FROM tasks t LEFT JOIN users u ON u.id = t.assigned_to
-           LEFT JOIN users c ON c.id = t.created_by WHERE t.id = ?""",
-        (task_id,),
-    ).fetchone()
+    task = with_id(mongo().tasks.find_one({"_id": task_id}))
     if not task:
         abort(404)
     user = current_user()
     # ลูกจ้างเห็นงานของตัวเอง และงาน "ทุกคน" ที่ยังไม่มีใครรับ
     if user["role"] == "employee" and task["assigned_to"] not in (user["id"], None):
         abort(403)
+    names = user_names()
+    task["assignee_name"] = names.get(task["assigned_to"])
+    task["creator_name"] = names.get(task.get("created_by"))
     return task
 
 
 def employees():
-    return db().execute("SELECT id, name FROM users WHERE role = 'employee' ORDER BY name").fetchall()
+    return [with_id(u) for u in mongo().users.find({"role": "employee"}, {"name": 1}).sort("name", ASCENDING)]
 
 
 INVALID = object()  # ค่าที่ parse_assignee คืนเมื่อผู้ใช้กรอกไม่ถูก
@@ -256,11 +188,19 @@ def parse_assignee(value):
     return INVALID
 
 
+def delete_tasks(query):
+    """ลบงานตามเงื่อนไข พร้อมรูปของงานนั้น"""
+    ids = [t["_id"] for t in mongo().tasks.find(query, {"_id": 1})]
+    if ids:
+        mongo().photos.delete_many({"task_id": {"$in": ids}})
+        mongo().tasks.delete_many({"_id": {"$in": ids}})
+
+
 # ---------------------------------------------------------------- login / setup
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
     """หน้าสร้างบัญชีนายจ้างคนแรก (ใช้ได้เฉพาะตอนยังไม่มีผู้ใช้ในระบบ)"""
-    if db().execute("SELECT 1 FROM users LIMIT 1").fetchone():
+    if mongo().users.find_one({}, {"_id": 1}):
         return redirect(url_for("login"))
     if request.method == "POST":
         name = request.form.get("name", "").strip()
@@ -269,11 +209,9 @@ def setup():
         if not name or not username or len(password) < 6:
             flash("กรอกข้อมูลให้ครบ และรหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร", "error")
         else:
-            db().execute(
-                "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
-                (username, generate_password_hash(password), name, "employer", now()),
-            )
-            db().commit()
+            mongo().users.insert_one({
+                "_id": next_id("users"), "username": username, "password_hash": generate_password_hash(password),
+                "name": name, "role": "employer", "created_at": now()})
             flash("สร้างบัญชีนายจ้างเรียบร้อย กรุณาเข้าสู่ระบบ", "success")
             return redirect(url_for("login"))
     return render_template("setup.html")
@@ -281,15 +219,13 @@ def setup():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    if not db().execute("SELECT 1 FROM users LIMIT 1").fetchone():
+    if not mongo().users.find_one({}, {"_id": 1}):
         return redirect(url_for("setup"))
     if request.method == "POST":
-        user = db().execute(
-            "SELECT * FROM users WHERE username = ?", (request.form.get("username", "").strip(),)
-        ).fetchone()
+        user = mongo().users.find_one({"username": request.form.get("username", "").strip()})
         if user and check_password_hash(user["password_hash"], request.form.get("password", "")):
             session.clear()
-            session["user_id"] = user["id"]
+            session["user_id"] = user["_id"]
             return redirect(url_for("tasks"))
         flash("ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง", "error")
     return render_template("login.html")
@@ -307,33 +243,33 @@ def index():
 
 
 # ---------------------------------------------------------------- tab: รายการงาน (ทั้งสอง role)
+STATUS_ORDER = {"submitted": 0, "rejected": 1, "pending": 2}
+
+
 @app.route("/tasks")
 @login_required()
 def tasks():
     user = current_user()
     status = request.args.get("status", "")
-    sql = """SELECT t.*, u.name AS assignee_name,
-                    (SELECT COUNT(*) FROM photos p WHERE p.task_id = t.id) AS photo_count
-             FROM tasks t LEFT JOIN users u ON u.id = t.assigned_to WHERE t.archived = 0"""
-    params = []
+    query = {"archived": 0}
     if user["role"] == "employee":
-        sql += " AND (t.assigned_to = ? OR t.assigned_to IS NULL)"
-        params.append(user["id"])
-    if status in STATUSES:
-        sql += " AND t.status = ?"
-        params.append(status)
-    sql += """ ORDER BY t.assigned_to IS NOT NULL, CASE t.status
-                 WHEN 'submitted' THEN 0 WHEN 'rejected' THEN 1
-                 WHEN 'pending' THEN 2 ELSE 3 END,
-               COALESCE(t.due_date, '9999'), t.id DESC"""
-    rows = db().execute(sql, params).fetchall()
+        query["assigned_to"] = {"$in": [user["id"], None]}
+    all_rows = [with_id(t) for t in mongo().tasks.find(query)]
 
-    count_sql = "SELECT status, COUNT(*) AS n FROM tasks WHERE archived = 0"
-    count_params = []
-    if user["role"] == "employee":
-        count_sql += " AND (assigned_to = ? OR assigned_to IS NULL)"
-        count_params.append(user["id"])
-    counts = {r["status"]: r["n"] for r in db().execute(count_sql + " GROUP BY status", count_params)}
+    counts = {}
+    for t in all_rows:
+        counts[t["status"]] = counts.get(t["status"], 0) + 1
+    rows = [t for t in all_rows if t["status"] == status] if status in STATUSES else all_rows
+
+    names = user_names()
+    photos = photo_counts(t["id"] for t in rows)
+    for t in rows:
+        t["assignee_name"] = names.get(t["assigned_to"])
+        t["photo_count"] = photos.get(t["id"], 0)
+    # เรียง: งาน "ทุกคน" ที่ยังไม่มีคนรับ → รอตรวจ → ให้แก้ไข → รอดำเนินการ → ผ่าน แล้วตามกำหนดส่ง
+    rows.sort(key=lambda t: -t["id"])
+    rows.sort(key=lambda t: (t["assigned_to"] is not None, STATUS_ORDER.get(t["status"], 3),
+                             t.get("due_date") or "9999"))
     return render_template("tasks.html", tasks=rows, status=status, counts=counts, tab="tasks")
 
 
@@ -341,13 +277,12 @@ def tasks():
 @login_required()
 def task_detail(task_id):
     if current_user()["role"] == "employee":
-        row = db().execute("SELECT assigned_to FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        row = mongo().tasks.find_one({"_id": task_id}, {"assigned_to": 1})
         if row and row["assigned_to"] not in (current_user()["id"], None):
             flash("มีคนอื่นรับงานนี้ไปแล้ว", "error")
             return redirect(url_for("tasks"))
     task = fetch_task(task_id)
-    photos = db().execute("SELECT id, task_id, filename, uploaded_at FROM photos WHERE task_id = ? ORDER BY id",
-                          (task_id,)).fetchall()
+    photos = [with_id(p) for p in mongo().photos.find({"task_id": task_id}, {"data": 0}).sort("_id", ASCENDING)]
     return render_template("task_detail.html", task=task, photos=photos, tab="tasks")
 
 
@@ -355,15 +290,12 @@ def task_detail(task_id):
 @app.route("/tasks/<int:task_id>/claim", methods=["POST"])
 @login_required("employee")
 def task_claim(task_id):
-    if not db().execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+    if not mongo().tasks.find_one({"_id": task_id}, {"_id": 1}):
         abort(404)
-    # อัปเดตแบบมีเงื่อนไขในคำสั่งเดียว: ถ้ากดพร้อมกันหลายคน จะมีแค่คนแรกที่สำเร็จ
-    cur = db().execute(
-        "UPDATE tasks SET assigned_to = ? WHERE id = ? AND assigned_to IS NULL AND archived = 0",
-        (current_user()["id"], task_id),
-    )
-    db().commit()
-    if cur.rowcount:
+    # อัปเดตแบบมีเงื่อนไขในคำสั่งเดียว (atomic): ถ้ากดพร้อมกันหลายคน จะมีแค่คนแรกที่สำเร็จ
+    res = mongo().tasks.update_one({"_id": task_id, "assigned_to": None, "archived": 0},
+                                   {"$set": {"assigned_to": current_user()["id"]}})
+    if res.modified_count:
         flash("รับงานเรียบร้อย งานนี้เป็นของคุณแล้ว ถ่ายรูปและส่งงานได้เลย", "success")
         return redirect(url_for("task_detail", task_id=task_id))
     flash("มีคนอื่นรับงานนี้ไปแล้ว", "error")
@@ -389,22 +321,21 @@ def task_upload(task_id):
         if ext not in ALLOWED_EXT:
             flash(f"ข้ามไฟล์ {f.filename}: รองรับเฉพาะไฟล์รูปภาพ", "error")
             continue
-        name = f"{task_id}_{uuid.uuid4().hex}.{ext}"
-        # เก็บตัวรูปในฐานข้อมูล (ใช้ได้ทั้งในเครื่องและบน Vercel ซึ่งไม่มีดิสก์ถาวร)
-        db().execute("INSERT INTO photos (task_id, filename, uploaded_at, mime, data) VALUES (?,?,?,?,?)",
-                     (task_id, name, now(), MIME.get(ext, "application/octet-stream"), f.read()))
+        data = f.read()
+        if len(data) > MAX_PHOTO_BYTES:
+            flash(f"ข้ามไฟล์ {f.filename}: รูปใหญ่เกิน 15 MB", "error")
+            continue
+        mongo().photos.insert_one({
+            "_id": next_id("photos"), "task_id": task_id, "filename": f"{task_id}_{uuid.uuid4().hex}.{ext}",
+            "uploaded_at": now(), "mime": MIME.get(ext, "application/octet-stream"), "data": data})
         saved += 1
 
-    has_photos = saved or db().execute("SELECT 1 FROM photos WHERE task_id = ?", (task_id,)).fetchone()
-    if not has_photos:
+    if not saved and not mongo().photos.find_one({"task_id": task_id}, {"_id": 1}):
         flash("กรุณาถ่ายรูปหรือเลือกรูปอย่างน้อย 1 รูปก่อนส่งงาน", "error")
         return redirect(url_for("task_detail", task_id=task_id))
 
-    db().execute(
-        "UPDATE tasks SET status = 'submitted', submitted_at = ?, employee_note = ? WHERE id = ?",
-        (now(), request.form.get("note", "").strip(), task_id),
-    )
-    db().commit()
+    mongo().tasks.update_one({"_id": task_id}, {"$set": {
+        "status": "submitted", "submitted_at": now(), "employee_note": request.form.get("note", "").strip()}})
     flash(f"ส่งงานเรียบร้อย (อัปโหลด {saved} รูป)", "success")
     return redirect(url_for("task_detail", task_id=task_id))
 
@@ -412,16 +343,14 @@ def task_upload(task_id):
 @app.route("/photos/<int:photo_id>/delete", methods=["POST"])
 @login_required()
 def photo_delete(photo_id):
-    photo = db().execute("SELECT id, task_id, filename FROM photos WHERE id = ?", (photo_id,)).fetchone()
+    photo = mongo().photos.find_one({"_id": photo_id}, {"task_id": 1})
     if not photo:
         abort(404)
     task = fetch_task(photo["task_id"])
     if current_user()["role"] == "employee" and (task["status"] == "approved"
                                                   or task["assigned_to"] != current_user()["id"]):
         abort(403)
-    _remove_file(photo["filename"])
-    db().execute("DELETE FROM photos WHERE id = ?", (photo_id,))
-    db().commit()
+    mongo().photos.delete_one({"_id": photo_id})
     flash("ลบรูปแล้ว", "success")
     return redirect(url_for("task_detail", task_id=task["id"]))
 
@@ -429,13 +358,11 @@ def photo_delete(photo_id):
 @app.route("/uploads/<int:photo_id>")
 @login_required()
 def photo_file(photo_id):
-    photo = db().execute("SELECT * FROM photos WHERE id = ?", (photo_id,)).fetchone()
+    photo = mongo().photos.find_one({"_id": photo_id})
     if not photo:
         abort(404)
     fetch_task(photo["task_id"])  # ตรวจสิทธิ์
-    if photo["data"] is None:  # รูปเก่าที่เก็บเป็นไฟล์
-        return send_from_directory(UPLOAD_DIR, photo["filename"])
-    resp = Response(bytes(photo["data"]), mimetype=photo["mime"] or "image/jpeg")
+    resp = Response(bytes(photo["data"]), mimetype=photo.get("mime") or "image/jpeg")
     resp.headers["Cache-Control"] = "private, max-age=86400"  # รูปไม่เปลี่ยน ให้เบราว์เซอร์เก็บไว้
     return resp
 
@@ -448,38 +375,42 @@ def task_review(task_id):
     decision = request.form.get("decision")
     if decision not in ("approved", "rejected"):
         abort(400)
-    db().execute("UPDATE tasks SET status = ?, feedback = ?, reviewed_at = ? WHERE id = ?",
-                 (decision, request.form.get("feedback", "").strip(), now(), task_id))
-    db().commit()
+    mongo().tasks.update_one({"_id": task_id}, {"$set": {
+        "status": decision, "feedback": request.form.get("feedback", "").strip(), "reviewed_at": now()}})
     flash("บันทึกผลการตรวจแล้ว: " + STATUSES[decision], "success")
     return redirect(url_for("task_detail", task_id=task_id))
 
 
 # ---------------------------------------------------------------- tab: เพิ่มรายการ (นายจ้าง)
+def task_fields():
+    return {
+        "title": request.form.get("title", "").strip(),
+        "description": request.form.get("description", "").strip(),
+        "location": request.form.get("location", "").strip(),
+        "due_date": request.form.get("due_date") or None,
+    }
+
+
 @app.route("/tasks/new", methods=["GET", "POST"])
 @login_required("employer")
 def task_new():
     if request.method == "POST":
-        title = request.form.get("title", "").strip()
+        fields = task_fields()
         assigned_to = parse_assignee(request.form.get("assigned_to", ""))
-        if not title or assigned_to is INVALID:
+        if not fields["title"] or assigned_to is INVALID:
             flash("กรุณากรอกชื่องานและเลือกผู้รับผิดชอบ", "error")
         else:
-            db().execute(
-                """INSERT INTO tasks (title, description, location, assigned_to, created_by, due_date, created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (title, request.form.get("description", "").strip(),
-                 request.form.get("location", "").strip(), assigned_to,
-                 current_user()["id"], request.form.get("due_date") or None, now()),
-            )
-            db().commit()
+            mongo().tasks.insert_one({
+                "_id": next_id("tasks"), **fields, "assigned_to": assigned_to,
+                "created_by": current_user()["id"], "status": "pending", "employee_note": "", "feedback": "",
+                "created_at": now(), "submitted_at": None, "reviewed_at": None, "archived": 0})
             flash("เพิ่มงานให้ทุกคนเรียบร้อย (คนแรกที่กดรับงานจะได้งานนี้)" if assigned_to is None
                   else "เพิ่มงานเรียบร้อย", "success")
             return redirect(url_for("task_new"))
-    rows = db().execute(
-        """SELECT t.*, u.name AS assignee_name FROM tasks t
-           LEFT JOIN users u ON u.id = t.assigned_to ORDER BY t.id DESC"""
-    ).fetchall()
+    names = user_names()
+    rows = [with_id(t) for t in mongo().tasks.find().sort("_id", -1)]
+    for t in rows:
+        t["assignee_name"] = names.get(t["assigned_to"])
     return render_template("task_new.html", tasks=rows, employees=employees(), tab="new")
 
 
@@ -488,19 +419,12 @@ def task_new():
 def task_edit(task_id):
     task = fetch_task(task_id)
     if request.method == "POST":
-        title = request.form.get("title", "").strip()
+        fields = task_fields()
         assigned_to = parse_assignee(request.form.get("assigned_to", ""))
-        if not title or assigned_to is INVALID:
+        if not fields["title"] or assigned_to is INVALID:
             flash("กรุณากรอกชื่องานและเลือกผู้รับผิดชอบ", "error")
         else:
-            db().execute(
-                """UPDATE tasks SET title = ?, description = ?, location = ?, assigned_to = ?, due_date = ?
-                   WHERE id = ?""",
-                (title, request.form.get("description", "").strip(),
-                 request.form.get("location", "").strip(), assigned_to,
-                 request.form.get("due_date") or None, task_id),
-            )
-            db().commit()
+            mongo().tasks.update_one({"_id": task_id}, {"$set": {**fields, "assigned_to": assigned_to}})
             flash("แก้ไขงานเรียบร้อย", "success")
             return redirect(url_for("task_new"))
     return render_template("task_edit.html", task=task, employees=employees(), tab="new")
@@ -511,8 +435,7 @@ def task_edit(task_id):
 def task_archive(task_id):
     """ลบจากแท็บรายการงาน: ซ่อนงานจากรายการ แต่ยังเก็บไว้ในรายการงานทั้งหมดเพื่อนำกลับมาใช้ใหม่"""
     fetch_task(task_id)
-    db().execute("UPDATE tasks SET archived = 1 WHERE id = ?", (task_id,))
-    db().commit()
+    mongo().tasks.update_one({"_id": task_id}, {"$set": {"archived": 1}})
     flash("นำงานออกจากรายการแล้ว (ยังอยู่ในรายการงานทั้งหมดที่แท็บเพิ่มรายการ)", "success")
     nxt = request.form.get("next", "")
     if not nxt.startswith("/") or nxt.startswith("//"):  # กัน redirect ออกนอกเว็บ
@@ -528,16 +451,11 @@ def task_reuse(task_id):
     assigned_to = parse_assignee(request.form.get("assigned_to", ""))
     if assigned_to is INVALID:
         assigned_to = task["assigned_to"]
-    for p in db().execute("SELECT filename FROM photos WHERE task_id = ?", (task_id,)):
-        _remove_file(p["filename"])
-    db().execute("DELETE FROM photos WHERE task_id = ?", (task_id,))
-    db().execute(
-        """UPDATE tasks SET archived = 0, status = 'pending', assigned_to = ?, due_date = ?,
-                  employee_note = '', feedback = '', submitted_at = NULL, reviewed_at = NULL
-           WHERE id = ?""",
-        (assigned_to, request.form.get("due_date") or None, task_id),
-    )
-    db().commit()
+    mongo().photos.delete_many({"task_id": task_id})
+    mongo().tasks.update_one({"_id": task_id}, {"$set": {
+        "archived": 0, "status": "pending", "assigned_to": assigned_to,
+        "due_date": request.form.get("due_date") or None, "employee_note": "", "feedback": "",
+        "submitted_at": None, "reviewed_at": None}})
     flash(f"นำงาน \"{task['title']}\" กลับมาใช้ใหม่แล้ว", "success")
     return redirect(url_for("task_new"))
 
@@ -547,10 +465,7 @@ def task_reuse(task_id):
 def task_delete(task_id):
     """ลบถาวร (จากตารางรายการงานทั้งหมดเท่านั้น)"""
     fetch_task(task_id)
-    for p in db().execute("SELECT filename FROM photos WHERE task_id = ?", (task_id,)):
-        _remove_file(p["filename"])
-    db().execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    db().commit()
+    delete_tasks({"_id": task_id})
     flash("ลบงานถาวรแล้ว", "success")
     return redirect(url_for("task_new"))
 
@@ -570,9 +485,7 @@ def account():
         elif new != request.form.get("confirm_password", ""):
             flash("ยืนยันรหัสผ่านใหม่ไม่ตรงกัน", "error")
         else:
-            db().execute("UPDATE users SET password_hash = ? WHERE id = ?",
-                         (generate_password_hash(new), user["id"]))
-            db().commit()
+            mongo().users.update_one({"_id": user["id"]}, {"$set": {"password_hash": generate_password_hash(new)}})
             flash("เปลี่ยนรหัสผ่านเรียบร้อย", "success")
             return redirect(url_for("account"))
     return render_template("account.html", tab="account")
@@ -589,27 +502,26 @@ def users():
         role = request.form.get("role")
         if not name or not username or len(password) < 6 or role not in ROLES:
             flash("กรอกข้อมูลให้ครบ และรหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร", "error")
-        elif db().execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+        elif mongo().users.find_one({"username": username}, {"_id": 1}):
             flash(f"ชื่อผู้ใช้ '{username}' ถูกใช้แล้ว", "error")
         else:
-            db().execute(
-                "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
-                (username, generate_password_hash(password), name, role, now()),
-            )
-            db().commit()
+            mongo().users.insert_one({
+                "_id": next_id("users"), "username": username, "password_hash": generate_password_hash(password),
+                "name": name, "role": role, "created_at": now()})
             flash(f"เพิ่มผู้ใช้ {name} เรียบร้อย", "success")
             return redirect(url_for("users"))
-    rows = db().execute(
-        """SELECT u.*, (SELECT COUNT(*) FROM tasks t WHERE t.assigned_to = u.id) AS task_count
-           FROM users u ORDER BY u.role, u.name"""
-    ).fetchall()
+    task_counts = {r["_id"]: r["n"] for r in mongo().tasks.aggregate(
+        [{"$group": {"_id": "$assigned_to", "n": {"$sum": 1}}}])}
+    rows = [with_id(u) for u in mongo().users.find().sort([("role", ASCENDING), ("name", ASCENDING)])]
+    for u in rows:
+        u["task_count"] = task_counts.get(u["id"], 0)
     return render_template("users.html", users=rows, tab="users")
 
 
 @app.route("/users/<int:user_id>/update", methods=["POST"])
 @login_required("employer")
 def user_update(user_id):
-    target = db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    target = mongo().users.find_one({"_id": user_id})
     if not target:
         abort(404)
     name = request.form.get("name", "").strip() or target["name"]
@@ -617,18 +529,17 @@ def user_update(user_id):
     if user_id == current_user()["id"] and role != "employer":
         flash("ไม่สามารถเปลี่ยน role ของตัวเองได้", "error")
         return redirect(url_for("users"))
-    if target["role"] == "employee" and role == "employer" and _has_tasks(user_id):
+    if target["role"] == "employee" and role == "employer" and mongo().tasks.find_one({"assigned_to": user_id}):
         flash("ผู้ใช้นี้ยังมีงานที่ได้รับมอบหมาย ลบหรือโอนงานก่อนเปลี่ยนเป็นนายจ้าง", "error")
         return redirect(url_for("users"))
-    db().execute("UPDATE users SET name = ?, role = ? WHERE id = ?", (name, role, user_id))
     password = request.form.get("password", "")
+    if password and len(password) < 6:
+        flash("รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร", "error")
+        return redirect(url_for("users"))
+    changes = {"name": name, "role": role}
     if password:
-        if len(password) < 6:
-            flash("รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร", "error")
-            return redirect(url_for("users"))
-        db().execute("UPDATE users SET password_hash = ? WHERE id = ?",
-                     (generate_password_hash(password), user_id))
-    db().commit()
+        changes["password_hash"] = generate_password_hash(password)
+    mongo().users.update_one({"_id": user_id}, {"$set": changes})
     flash(f"บันทึกข้อมูล {name} แล้ว", "success")
     return redirect(url_for("users"))
 
@@ -639,24 +550,11 @@ def user_delete(user_id):
     if user_id == current_user()["id"]:
         flash("ไม่สามารถลบบัญชีของตัวเองได้", "error")
         return redirect(url_for("users"))
-    for p in db().execute(
-        "SELECT p.filename FROM photos p JOIN tasks t ON t.id = p.task_id WHERE t.assigned_to = ?", (user_id,)
-    ):
-        _remove_file(p["filename"])
-    db().execute("DELETE FROM users WHERE id = ?", (user_id,))
-    db().commit()
+    delete_tasks({"assigned_to": user_id})  # งานที่มอบหมายให้คนนี้ถูกลบด้วย
+    mongo().tasks.update_many({"created_by": user_id}, {"$set": {"created_by": None}})
+    mongo().users.delete_one({"_id": user_id})
     flash("ลบผู้ใช้แล้ว (งานที่มอบหมายให้ผู้ใช้นี้ถูกลบด้วย)", "success")
     return redirect(url_for("users"))
-
-
-def _has_tasks(user_id):
-    return db().execute("SELECT 1 FROM tasks WHERE assigned_to = ?", (user_id,)).fetchone() is not None
-
-
-def _remove_file(filename):
-    path = os.path.join(UPLOAD_DIR, os.path.basename(filename))
-    if os.path.exists(path):
-        os.remove(path)
 
 
 @app.errorhandler(413)
@@ -665,8 +563,17 @@ def too_large(_e):
     return redirect(request.referrer or url_for("tasks"))
 
 
-init_db()
-app.secret_key = _secret_key()
+if MONGODB_URI:
+    init_db()
+    app.secret_key = _secret_key()
+else:  # ให้เปิดหน้าเว็บแล้วเห็นข้อความแจ้งชัดเจน แทนที่จะพังตอนเริ่ม
+    app.secret_key = "not-configured"
+
+    @app.before_request
+    def _not_configured():
+        return Response("ยังไม่ได้ตั้งค่า MONGODB_URI — ใส่ใน Vercel → Settings → Environment Variables "
+                        "แล้ว Redeploy (หรือใส่ในไฟล์ .env ตอนรันในเครื่อง)", status=500,
+                        mimetype="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5050)), debug=os.environ.get("DEBUG") == "1")

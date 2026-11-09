@@ -2,7 +2,7 @@
 
 เว็บสำหรับนายจ้างมอบหมายงาน และลูกจ้างถ่ายรูปส่งงานเพื่อให้นายจ้างตรวจ
 
-**เทคโนโลยี:** Python + Flask · ฐานข้อมูล SQLite (ในเครื่อง) หรือ Postgres (บน Vercel / เซิร์ฟเวอร์จริง) — เลือกอัตโนมัติจาก env `DATABASE_URL`
+**เทคโนโลยี:** Python + Flask + MongoDB (เช่น MongoDB Atlas) · deploy บน Vercel
 
 ## การใช้งาน
 
@@ -17,52 +17,39 @@
 
 สถานะงาน: **รอดำเนินการ → ส่งงานแล้ว รอตรวจ → ผ่าน / ให้แก้ไข** (ถ้าให้แก้ไข ลูกจ้างส่งรูปใหม่ได้)
 
-## ติดตั้งและรัน
+## ตั้งค่าฐานข้อมูล (MongoDB)
+
+แอปอ่าน connection string จาก env `MONGODB_URI` — **ห้ามใส่รหัสผ่านลงในโค้ดหรือ push ขึ้น GitHub**
+
+- ใน MongoDB Atlas → **Network Access** ต้องอนุญาต IP `0.0.0.0/0` (Vercel ไม่มี IP คงที่)
+- ข้อมูลทั้งหมดอยู่ใน database `worklist` (เปลี่ยนได้ด้วย `MONGODB_DB`): `users`, `tasks`, `photos` (ตัวรูป), `counters`, `settings`
+- รูปถูกย่อในเบราว์เซอร์ก่อนส่ง (ด้านยาวสุด 1600px, JPEG) เหลือประมาณ 300–500 KB ต่อรูป
+- กุญแจ session: ใช้ env `SECRET_KEY` ถ้ามี ไม่งั้นระบบสร้างให้ครั้งเดียวและเก็บใน collection `settings`
+
+## Deploy บน Vercel
+
+1. Push โค้ดขึ้น GitHub แล้ว Import โปรเจกต์ใน Vercel
+2. **Application Preset:** ปล่อย **Other** ได้ (ไฟล์ `vercel.json` กำหนดให้แล้ว) · Build / Output / Install Command ปล่อยว่าง
+3. **Environment Variables:** เพิ่ม `MONGODB_URI` = connection string ของ MongoDB Atlas (`mongodb+srv://...`)
+4. **Deploy** → เปิดเว็บ → หน้า "ตั้งค่าครั้งแรก" → สร้างบัญชีนายจ้าง
+
+ถ้าลืมตั้ง `MONGODB_URI` หน้าเว็บจะแสดงข้อความแจ้งให้ตั้งค่า
+
+ข้อจำกัด
+- ส่งรูปได้รวมไม่เกิน **4 MB ต่อครั้ง** บน Vercel (หลังย่อ ≈ 8–10 รูป) ถ้าเกินเว็บจะเตือนให้ส่งทีละน้อยรูป
+- MongoDB Atlas แพ็กเกจฟรี (M0) มีพื้นที่ 512 MB ≈ 1,000+ รูป — ลบงานถาวร / นำกลับมาใช้ จะคืนพื้นที่ของรูปเก่า
+
+## รันในเครื่อง
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+cp .env.example .env     # แล้วแก้ MONGODB_URI ในไฟล์ .env
 .venv/bin/python app.py
 ```
 
-เปิด http://localhost:5050 — ครั้งแรกระบบจะให้สร้างบัญชี **นายจ้าง** คนแรก จากนั้นเพิ่มลูกจ้างที่แท็บ "จัดการบุคคล"
-
-ให้มือถือในวง Wi-Fi เดียวกันเข้าได้ที่ `http://<IP เครื่องนี้>:5050`
-
-> หมายเหตุ: ปุ่ม "ถ่ายรูป" จะเปิดกล้องได้บนมือถือทุกกรณี แต่ถ้าจะใช้งานจริงผ่านอินเทอร์เน็ตควรใช้ HTTPS
-
-## ข้อมูลเก็บที่ไหน
-
-| โหมด | เงื่อนไข | ข้อมูลอยู่ที่ |
-|---|---|---|
-| ในเครื่อง | ไม่ได้ตั้ง `DATABASE_URL` | โฟลเดอร์ `data/` → `worklist.db` (ผู้ใช้ งาน และ**รูป**) — สำรองข้อมูลด้วยการ copy โฟลเดอร์นี้ |
-| Postgres | ตั้ง `DATABASE_URL` (หรือ `POSTGRES_URL`) | ฐานข้อมูล Postgres ทั้งหมด รวมถึงรูป |
-
-- รูปถูกย่อในเบราว์เซอร์ก่อนส่ง (ด้านยาวสุด 1600px, JPEG) เหลือประมาณ 300–500 KB ต่อรูป และเก็บไว้ในฐานข้อมูล
-- กุญแจ session: ใช้ env `SECRET_KEY` ถ้ามี ไม่งั้นระบบสร้างให้ครั้งเดียวและเก็บไว้ในตาราง `settings`
-- env อื่น: `WORKLIST_DATA=/path` (ที่เก็บโหมดในเครื่อง), `PORT=8000`
-
-## Deploy บน Vercel
-
-1. **สร้างฐานข้อมูล:** Vercel → โปรเจกต์ → แท็บ **Storage** → **Create Database** → เลือก **Neon (Postgres)** → Connect กับโปรเจกต์นี้
-   (Vercel จะเพิ่ม env `DATABASE_URL` ให้อัตโนมัติ — ตรวจที่ Settings → Environment Variables)
-2. **ตั้งค่าโปรเจกต์:** Application Preset ปล่อย **Other** ได้ (ไฟล์ `vercel.json` กำหนดให้แล้ว) · Build / Output / Install Command ปล่อยว่าง
-3. **(แนะนำ)** เพิ่ม env `SECRET_KEY` = ข้อความสุ่มยาว ๆ — สร้างด้วย `python3 -c "import secrets; print(secrets.token_hex(32))"`
-4. **Deploy** (หรือ Redeploy ถ้าเพิ่ง connect ฐานข้อมูล) แล้วเปิดเว็บ → หน้า "ตั้งค่าครั้งแรก" → สร้างบัญชีนายจ้าง
-
-ข้อจำกัดบน Vercel
-- ส่งรูปได้รวมไม่เกิน **4 MB ต่อครั้ง** (หลังย่อแล้ว ≈ 8–10 รูป) ถ้าเกิน เว็บจะเตือนให้ส่งทีละน้อยรูป
-- พื้นที่ Neon แพ็กเกจฟรีประมาณ 0.5 GB ≈ 1,000+ รูป — ลบงานถาวร / นำกลับมาใช้ จะคืนพื้นที่ของรูปเก่า
-- ถ้า**ไม่**ตั้ง `DATABASE_URL` บน Vercel ระบบจะเก็บข้อมูลใน `/tmp` ซึ่ง**หายเองเป็นระยะ** ใช้ได้แค่ทดลอง
-
-## ขึ้นใช้งานบนเซิร์ฟเวอร์ของตัวเอง
-
-```bash
-.venv/bin/pip install gunicorn
-.venv/bin/gunicorn -w 2 -b 0.0.0.0:5050 app:app
-```
-
-แล้ววาง reverse proxy ที่มี HTTPS ไว้ข้างหน้า (เช่น Caddy หรือ nginx) หรือใช้ Railway / Render / VPS ที่มี persistent disk สำหรับ `data/` (หรือตั้ง `DATABASE_URL` ไปที่ Postgres)
+เปิด http://localhost:5050 — ไฟล์ `.env` ถูก ignore ไว้ ไม่ขึ้น GitHub
+แนะนำใช้ `MONGODB_DB=worklist_dev` ในเครื่อง เพื่อไม่ให้ปนกับข้อมูลจริง
 
 ## โครงสร้างโค้ด
 
@@ -78,8 +65,8 @@ templates/           หน้าเว็บ (Jinja)
 static/style.css     สไตล์ทั้งหมด
 ```
 
-ลืมรหัสผ่านนายจ้างคนเดียวในระบบ: ลบไฟล์ `data/worklist.db` จะเริ่มใหม่ทั้งหมด หรือรีเซ็ตด้วยคำสั่ง
+ลืมรหัสผ่านนายจ้างคนเดียวในระบบ: รีเซ็ตด้วยคำสั่งนี้ (ในเครื่องที่มีไฟล์ `.env` ชี้ไปฐานข้อมูลจริง)
 
 ```bash
-.venv/bin/python -c "import app,sqlite3;from werkzeug.security import generate_password_hash as h;c=sqlite3.connect(app.DB_PATH);c.execute('UPDATE users SET password_hash=? WHERE username=?',(h('รหัสใหม่'),'ชื่อผู้ใช้'));c.commit()"
+.venv/bin/python -c "import app;from werkzeug.security import generate_password_hash as h;app.mongo().users.update_one({'username':'ชื่อผู้ใช้'},{'\$set':{'password_hash':h('รหัสใหม่')}})"
 ```

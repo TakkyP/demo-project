@@ -123,7 +123,7 @@
 
 | ID | หมวด | Requirement |
 |---|---|---|
-| NFR-01 | ดูแลง่าย | ใช้ Python + Flask โค้ดฝั่งเซิร์ฟเวอร์อยู่ในไฟล์เดียว ฐานข้อมูลใช้ SQLite ตอนรันในเครื่อง และ Postgres เมื่อตั้ง `DATABASE_URL` (โค้ดชุดเดียวกัน) |
+| NFR-01 | ดูแลง่าย | ใช้ Python + Flask โค้ดฝั่งเซิร์ฟเวอร์อยู่ในไฟล์เดียว ฐานข้อมูล MongoDB (Atlas) ผ่าน env `MONGODB_URI` dependency มีแค่ Flask และ pymongo |
 | NFR-02 | มือถือ | รองรับหน้าจอมือถือ (responsive) ปุ่มถ่ายรูปเปิดกล้องได้ทันที |
 | NFR-03 | ภาษา | หน้าเว็บทั้งหมดเป็นภาษาไทย |
 | NFR-03a | ดีไซน์ | ธีมสีแดง-ขาว: แถบด้านบนสีแดงตัวอักษรขาว พื้นหลังและการ์ดสีขาว ปุ่มหลัก ลิงก์ แท็บที่เลือก และตัวกรองเป็นสีแดง สีเขียวและสีส้มใช้เฉพาะป้ายสถานะ "ผ่าน" และ "รอตรวจ" |
@@ -131,22 +131,22 @@
 | NFR-05 | ความปลอดภัย | ทุกฟอร์มที่บันทึกข้อมูลมี CSRF token |
 | NFR-06 | ความปลอดภัย | การดูรูปต้องเข้าสู่ระบบและมีสิทธิ์ในงานนั้น ไม่มีลิงก์รูปแบบเปิดสาธารณะ |
 | NFR-07 | ความปลอดภัย | หลังทำรายการ ระบบ redirect ได้เฉพาะหน้าในเว็บเดียวกัน (กัน open redirect) |
-| NFR-08 | ไฟล์ | รับเฉพาะไฟล์รูป: jpg, jpeg, png, gif, webp, heic, heif ไฟล์ที่ไม่ใช่รูปจะถูกข้ามพร้อมแจ้งเตือน เบราว์เซอร์ย่อรูปก่อนส่ง (ด้านยาวสุด 1600px, JPEG) ส่งได้สูงสุด 4 MB ต่อครั้งบน Vercel และ 60 MB เมื่อรันเอง ถ้าเกินเว็บจะเตือนก่อนส่ง และปุ่มส่งงานล็อกหลังกดเพื่อกันการส่งซ้ำ |
+| NFR-08 | ไฟล์ | รับเฉพาะไฟล์รูป: jpg, jpeg, png, gif, webp, heic, heif ไฟล์ที่ไม่ใช่รูปจะถูกข้ามพร้อมแจ้งเตือน เบราว์เซอร์ย่อรูปก่อนส่ง (ด้านยาวสุด 1600px, JPEG) ส่งได้สูงสุด 4 MB ต่อครั้งบน Vercel (รูปเดียวไม่เกิน 15 MB) ถ้าเกินเว็บจะเตือนก่อนส่ง และปุ่มส่งงานล็อกหลังกดเพื่อกันการส่งซ้ำ |
 | NFR-09 | ไฟล์ | เก็บตัวรูปในฐานข้อมูล (ไม่พึ่งดิสก์ของเซิร์ฟเวอร์) ตั้งชื่อใหม่แบบสุ่ม (UUID) และส่งรูปให้เบราว์เซอร์ cache ได้ |
 | NFR-10 | การทำงานพร้อมกัน | การรับงาน "ทุกคน" ทำแบบ atomic ในคำสั่งเดียว รับประกันว่าได้ผู้รับคนเดียว |
-| NFR-11 | ข้อมูล | ข้อมูลทั้งหมดอยู่ในฐานข้อมูลที่เดียว (ผู้ใช้ งาน รูป และ secret key ในตาราง settings) โหมดในเครื่องสำรองได้ด้วยการ copy โฟลเดอร์ `data/` |
+| NFR-11 | ข้อมูล | ข้อมูลทั้งหมดอยู่ใน MongoDB ที่เดียว (ผู้ใช้ งาน รูป และ secret key) ไม่มีข้อมูลบนดิสก์ของเซิร์ฟเวอร์ รหัสผ่านฐานข้อมูลเก็บใน env เท่านั้น ห้ามอยู่ในโค้ด |
 | NFR-12 | อัปเกรด | เมื่อโครงสร้างฐานข้อมูลเปลี่ยน ระบบปรับฐานข้อมูลเดิมให้อัตโนมัติตอนเปิด โดยข้อมูลเดิมไม่หาย |
-| NFR-13 | Deploy | Deploy บน Vercel ได้ (มี `vercel.json` และใช้ Postgres ของ Neon ผ่าน `DATABASE_URL`) หรือรันเองด้วย `python app.py` / gunicorn หลัง HTTPS ระบบต้องทำงานถูกต้องเมื่อ Vercel เปิดหลายเครื่องพร้อมกันหรือ cold start |
+| NFR-13 | Deploy | Deploy บน Vercel (`vercel.json`) ระบบต้องทำงานถูกต้องเมื่อ Vercel เปิดหลายเครื่องพร้อมกันหรือ cold start และแสดงข้อความชัดเจนถ้ายังไม่ได้ตั้ง `MONGODB_URI` |
 
-## 6. Data Model
+## 6. Data Model (MongoDB collections)
 
-**users** — id, username (unique), password_hash, name, role (`employer` / `employee`), created_at
+**users** — _id (เลขลำดับ), username (unique), password_hash, name, role (`employer` / `employee`), created_at
 
-**tasks** — id, title, description, location (บริเวณงาน), assigned_to (NULL = ทุกคน ยังไม่มีคนรับ), created_by, due_date, status (`pending` / `submitted` / `approved` / `rejected`), employee_note, feedback, created_at, submitted_at, reviewed_at, archived (0/1)
+**tasks** — _id (เลขลำดับ), title, description, location (บริเวณงาน), assigned_to (null = ทุกคน ยังไม่มีคนรับ), created_by, due_date, status (`pending` / `submitted` / `approved` / `rejected`), employee_note, feedback, created_at, submitted_at, reviewed_at, archived (0/1)
 
-**photos** — id, task_id, filename, uploaded_at, mime, data (ตัวรูป)
+**photos** — _id (เลขลำดับ), task_id, filename, uploaded_at, mime, data (ตัวรูป)
 
-**settings** — key, value (เก็บ secret_key)
+**counters** — _id (ชื่อ collection), seq — ใช้สร้างเลข id เรียงกัน · **settings** — _id `secret_key`, value
 
 ## 7. การทดสอบที่ผ่านแล้ว
 
