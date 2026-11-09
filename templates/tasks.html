@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, assignee with context %}
+{% block title %}รายการงาน{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>รายการงาน{% if user.role == 'employee' %}ของฉัน{% endif %}</h1>
+</div>
+
+<div class="filters">
+  <a href="{{ url_for('tasks') }}" class="chip {{ 'active' if not status }}">ทั้งหมด <b>{{ counts.values()|sum }}</b></a>
+  {% for key, label in STATUSES.items() %}
+  <a href="{{ url_for('tasks', status=key) }}" class="chip chip-{{ key }} {{ 'active' if status == key }}">{{ label }} <b>{{ counts.get(key, 0) }}</b></a>
+  {% endfor %}
+</div>
+
+{% if tasks %}
+<div class="task-list">
+  {% for t in tasks %}
+  <div class="task-card status-{{ t.status }}">
+    <div class="task-card-main">
+      <a class="task-title stretch" href="{{ url_for('task_detail', task_id=t.id) }}">{{ t.title }}</a>
+      {% if t.description %}<div class="task-desc">{{ t.description|truncate(120) }}</div>{% endif %}
+      <div class="meta">
+        {% if t.location %}<span>📍 {{ t.location }}</span>{% endif %}
+        {% if user.role == 'employer' %}<span>👤 {{ assignee(t) }}</span>
+        {% elif not t.assigned_to %}<span class="badge badge-open">🙋 งานสำหรับทุกคน — ยังไม่มีคนรับ</span>{% endif %}
+        {% if t.due_date %}<span>📅 กำหนดส่ง {{ t.due_date }}</span>{% endif %}
+        <span>📷 {{ t.photo_count }} รูป</span>
+      </div>
+    </div>
+    <div class="task-card-side">
+      {{ status_badge(t.status) }}
+      <div class="card-actions">
+        {% if user.role == 'employer' %}
+        <form method="post" action="{{ url_for('task_archive', task_id=t.id) }}" onsubmit='return confirm({{ ("ลบงาน \"" ~ t.title ~ "\" ออกจากรายการ?\n(งานยังอยู่ในรายการงานทั้งหมด และนำกลับมาใช้ใหม่ได้)")|tojson }})'>
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="next" value="{{ request.full_path }}">
+          <button class="link-danger">ลบ</button>
+        </form>
+        {% endif %}
+        <span class="go">
+          {% if user.role == 'employer' and t.status == 'submitted' %}ตรวจงาน →
+          {% elif user.role == 'employee' and not t.assigned_to %}รับงาน →
+          {% elif user.role == 'employee' and t.status in ('pending', 'rejected') %}ส่งงาน →
+          {% else %}ดู →{% endif %}
+        </span>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty card">
+  {% if user.role == 'employer' %}
+    ยังไม่มีงานในหมวดนี้ — <a href="{{ url_for('task_new') }}">เพิ่มรายการงาน</a>
+  {% else %}
+    ยังไม่มีงานที่ได้รับมอบหมายในหมวดนี้
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% from "_macros.html" import task_form with context %}
+{% block title %}แก้ไขงาน{% endblock %}
+{% block content %}
+<a class="back" href="{{ url_for('task_new') }}">← กลับ</a>
+<div class="card">
+  <h1>แก้ไขงาน #{{ task.id }}</h1>
+  <form method="post">{{ task_form(employees, task, 'บันทึก') }}</form>
+</div>
+{% endblock %}

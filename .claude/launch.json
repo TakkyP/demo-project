@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "worklist",
+      "runtimeExecutable": "/Users/takky.p/Desktop/project-pthep/.venv/bin/python",
+      "runtimeArgs": [
+        "/Users/takky.p/Desktop/project-pthep/app.py"
+      ],
+      "port": 5050
+    }
+  ]
+}

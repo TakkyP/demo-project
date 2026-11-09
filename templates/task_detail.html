@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, assignee with context %}
+{% block title %}{{ task.title }}{% endblock %}
+{% block content %}
+<a class="back" href="{{ url_for('tasks') }}">← กลับไปรายการงาน</a>
+
+<div class="card">
+  <div class="detail-head">
+    <h1>{{ task.title }}</h1>
+    {% if task.archived %}<span class="badge badge-archived">นำออกจากรายการแล้ว</span>{% else %}{{ status_badge(task.status) }}{% endif %}
+  </div>
+  {% if task.description %}<p class="pre">{{ task.description }}</p>{% endif %}
+  <dl class="facts">
+    <div><dt>บริเวณงาน</dt><dd>{{ task.location or '—' }}</dd></div>
+    <div><dt>ผู้รับผิดชอบ</dt><dd>{{ assignee(task) }}</dd></div>
+    <div><dt>มอบหมายโดย</dt><dd>{{ task.creator_name or '—' }}</dd></div>
+    <div><dt>กำหนดส่ง</dt><dd>{{ task.due_date or '—' }}</dd></div>
+    <div><dt>สร้างเมื่อ</dt><dd>{{ task.created_at }}</dd></div>
+    {% if task.submitted_at %}<div><dt>ส่งงานล่าสุด</dt><dd>{{ task.submitted_at }}</dd></div>{% endif %}
+    {% if task.reviewed_at %}<div><dt>ตรวจล่าสุด</dt><dd>{{ task.reviewed_at }}</dd></div>{% endif %}
+  </dl>
+  {% if task.employee_note %}
+  <div class="note"><b>หมายเหตุจากลูกจ้าง:</b> <span class="pre">{{ task.employee_note }}</span></div>
+  {% endif %}
+  {% if task.feedback %}
+  <div class="note note-{{ task.status }}"><b>ความเห็นจากนายจ้าง:</b> <span class="pre">{{ task.feedback }}</span></div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>รูปภาพงาน ({{ photos|length }})</h2>
+  {% if photos %}
+  <div class="gallery">
+    {% for p in photos %}
+    <figure>
+      <a href="{{ url_for('photo_file', photo_id=p.id) }}" target="_blank"><img src="{{ url_for('photo_file', photo_id=p.id) }}" alt="รูปงาน" loading="lazy"></a>
+      <figcaption>
+        {{ p.uploaded_at }}
+        {% if user.role == 'employer' or (task.assigned_to == user.id and task.status != 'approved') %}
+        <form method="post" action="{{ url_for('photo_delete', photo_id=p.id) }}" onsubmit="return confirm('ลบรูปนี้?')">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="link-danger">ลบ</button>
+        </form>
+        {% endif %}
+      </figcaption>
+    </figure>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">ยังไม่มีรูปภาพ</p>
+  {% endif %}
+</div>
+
+{% if user.role == 'employee' and not task.assigned_to and not task.archived %}
+<div class="card claim">
+  <h2>🙋 งานนี้สำหรับทุกคน</h2>
+  <p class="muted">ยังไม่มีใครรับงานนี้ กด "รับงาน" เพื่อเป็นผู้รับผิดชอบ — งานจะเป็นของคุณคนเดียว และหายไปจากรายการของคนอื่น</p>
+  <form method="post" action="{{ url_for('task_claim', task_id=task.id) }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="btn btn-primary btn-block">รับงานนี้</button>
+  </form>
+</div>
+{% endif %}
+
+{% if user.role == 'employee' and task.assigned_to == user.id and task.status != 'approved' and not task.archived %}
+<div class="card">
+  <h2>{% if task.status == 'submitted' %}ส่งรูปเพิ่มเติม{% else %}ถ่ายรูปและส่งงาน{% endif %}</h2>
+  <form method="post" action="{{ url_for('task_upload', task_id=task.id) }}" enctype="multipart/form-data" id="upload-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="upload-buttons">
+      <label class="btn btn-primary">📷 ถ่ายรูป
+        <input type="file" name="photos" accept="image/*" capture="environment" hidden data-preview>
+      </label>
+      <label class="btn">🖼 เลือกจากคลังภาพ
+        <input type="file" name="photos" accept="image/*" multiple hidden data-preview>
+      </label>
+    </div>
+    <div class="preview" id="preview"></div>
+    <label>หมายเหตุ (ถ้ามี)
+      <textarea name="note" rows="2">{{ task.employee_note }}</textarea>
+    </label>
+    <button class="btn btn-success btn-block">ส่งงาน</button>
+  </form>
+</div>
+<script>
+  // แสดงตัวอย่างรูปก่อนส่ง และให้ถ่ายรูปหลายครั้งได้ (สร้าง input ใหม่ทุกครั้งที่ถ่าย)
+  (function () {
+    const form = document.getElementById('upload-form');
+    const preview = document.getElementById('preview');
+    function bind(input) {
+      input.addEventListener('change', function () {
+        if (!input.files.length) return;
+        for (const f of input.files) {
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(f);
+          preview.appendChild(img);
+        }
+        const fresh = input.cloneNode();
+        fresh.value = '';
+        input.parentNode.appendChild(fresh);
+        input.removeAttribute('data-preview');
+        form.appendChild(input);  // ย้าย input ที่มีไฟล์แล้วไปเก็บไว้ในฟอร์ม
+        bind(fresh);
+      });
+    }
+    form.querySelectorAll('input[data-preview]').forEach(bind);
+  })();
+</script>
+{% endif %}
+
+{% if user.role == 'employer' %}
+<div class="card">
+  <h2>ตรวจงาน</h2>
+  {% if task.status == 'pending' %}<p class="muted">ลูกจ้างยังไม่ได้ส่งงาน แต่สามารถบันทึกผลได้หากต้องการ</p>{% endif %}
+  <form method="post" action="{{ url_for('task_review', task_id=task.id) }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>ความเห็น / สิ่งที่ต้องแก้ไข
+      <textarea name="feedback" rows="3">{{ task.feedback }}</textarea>
+    </label>
+    <div class="row-buttons">
+      <button class="btn btn-success" name="decision" value="approved">✓ ผ่าน</button>
+      <button class="btn btn-danger" name="decision" value="rejected">↺ ให้แก้ไข</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

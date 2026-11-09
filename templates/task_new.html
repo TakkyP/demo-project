@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, task_form, assignee with context %}
+{% block title %}เพิ่มรายการ{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>เพิ่มรายการงาน</h1>
+  {% if employees %}
+  <form method="post">{{ task_form(employees) }}</form>
+  {% else %}
+  <p class="muted">ยังไม่มีลูกจ้างในระบบ — <a href="{{ url_for('users') }}">เพิ่มลูกจ้างที่แท็บจัดการบุคคล</a> ก่อน</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>รายการงานทั้งหมด ({{ tasks|length }})</h2>
+  {% if tasks %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>#</th><th>ชื่องาน</th><th>บริเวณงาน</th><th>ผู้รับผิดชอบ</th><th>กำหนดส่ง</th><th>สถานะ</th><th>สร้างเมื่อ</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for t in tasks %}
+        <tr class="{{ 'row-archived' if t.archived }}">
+          <td class="muted">{{ t.id }}</td>
+          <td><a href="{{ url_for('task_detail', task_id=t.id) }}">{{ t.title }}</a></td>
+          <td>{{ t.location or '—' }}</td>
+          <td>{{ assignee(t) }}</td>
+          <td>{{ t.due_date or '—' }}</td>
+          <td>{% if t.archived %}<span class="badge badge-archived">นำออกจากรายการแล้ว</span>{% else %}{{ status_badge(t.status) }}{% endif %}</td>
+          <td class="muted nowrap">{{ t.created_at }}</td>
+          <td class="nowrap actions">
+            <a href="{{ url_for('task_edit', task_id=t.id) }}">แก้ไข</a>
+            {% if t.archived or t.status == 'approved' %}
+            <details>
+              <summary>นำกลับมาใช้</summary>
+              <form method="post" action="{{ url_for('task_reuse', task_id=t.id) }}" class="inline-edit"
+                    onsubmit="return confirm('เริ่มงานรอบใหม่? รูปและความเห็นของรอบก่อนจะถูกล้าง')">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label>มอบหมายให้
+                  <select name="assigned_to">
+                    <option value="all" {{ 'selected' if not t.assigned_to }}>ทุกคน (คนแรกที่กดรับงานจะได้งานนี้)</option>
+                    {% for e in employees %}<option value="{{ e.id }}" {{ 'selected' if e.id == t.assigned_to }}>{{ e.name }}</option>{% endfor %}
+                  </select>
+                </label>
+                <label>กำหนดส่งใหม่ <input type="date" name="due_date"></label>
+                <button class="btn btn-primary btn-sm">นำกลับมาใช้</button>
+              </form>
+            </details>
+            {% endif %}
+            <form method="post" action="{{ url_for('task_delete', task_id=t.id) }}" onsubmit='return confirm({{ ("ลบงาน \"" ~ t.title ~ "\" ถาวร?\nจะหายจากรายการงานทั้งหมดและนำกลับมาใช้ไม่ได้อีก")|tojson }})'>
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <button class="link-danger">ลบถาวร</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">ยังไม่มีงาน</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,35 @@
+{% macro status_badge(status) -%}
+<span class="badge badge-{{ status }}">{{ STATUSES[status] }}</span>
+{%- endmacro %}
+
+{% macro assignee(t) -%}
+{% if t.assigned_to %}{{ t.assignee_name }}{% else %}<span class="badge badge-open">ทุกคน · ยังไม่มีคนรับ</span>{% endif %}
+{%- endmacro %}
+
+{% macro task_form(employees, task=None, submit='เพิ่มงาน') -%}
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="grid2">
+  <label>ชื่องาน *
+    <input name="title" required maxlength="200" value="{{ task.title if task }}" placeholder="เช่น ทำความสะอาดห้องประชุม">
+  </label>
+  <label>มอบหมายให้ *
+    <select name="assigned_to" required>
+      <option value="">— เลือกลูกจ้าง —</option>
+      <option value="all" {{ 'selected' if task and not task.assigned_to }}>ทุกคน (คนแรกที่กดรับงานจะได้งานนี้)</option>
+      {% for e in employees %}
+      <option value="{{ e.id }}" {{ 'selected' if task and task.assigned_to == e.id }}>{{ e.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</div>
+<label>บริเวณงานที่ได้รับมอบหมาย
+  <input name="location" maxlength="200" value="{{ task.location if task }}" placeholder="เช่น อาคาร A ชั้น 2 ห้องประชุมใหญ่">
+</label>
+<label>รายละเอียด / สิ่งที่ต้องตรวจ
+  <textarea name="description" rows="3" placeholder="อธิบายงาน หรือจุดที่ต้องถ่ายรูปยืนยัน">{{ task.description if task }}</textarea>
+</label>
+<label class="narrow">กำหนดส่ง
+  <input type="date" name="due_date" value="{{ task.due_date or '' if task }}">
+</label>
+<button class="btn btn-primary">{{ submit }}</button>
+{%- endmacro %}

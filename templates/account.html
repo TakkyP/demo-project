@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}เปลี่ยนรหัสผ่าน{% endblock %}
+{% block content %}
+<div class="card auth-inline">
+  <h1>เปลี่ยนรหัสผ่าน</h1>
+  <p class="muted">บัญชี: <b>{{ user.username }}</b> ({{ user.name }})</p>
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>รหัสผ่านปัจจุบัน <input name="current_password" type="password" required autocomplete="current-password"></label>
+    <label>รหัสผ่านใหม่ (อย่างน้อย 6 ตัว) <input name="new_password" type="password" minlength="6" required autocomplete="new-password"></label>
+    <label>ยืนยันรหัสผ่านใหม่ <input name="confirm_password" type="password" minlength="6" required autocomplete="new-password"></label>
+    <button class="btn btn-primary">บันทึกรหัสผ่านใหม่</button>
+  </form>
+</div>
+{% endblock %}

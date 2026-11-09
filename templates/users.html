@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}จัดการบุคคล{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>เพิ่มผู้ใช้</h1>
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="grid2">
+      <label>ชื่อที่แสดง * <input name="name" required></label>
+      <label>Role *
+        <select name="role" required>
+          <option value="employee">ลูกจ้าง</option>
+          <option value="employer">นายจ้าง</option>
+        </select>
+      </label>
+      <label>ชื่อผู้ใช้ (สำหรับเข้าระบบ) * <input name="username" required autocomplete="off"></label>
+      <label>รหัสผ่าน (อย่างน้อย 6 ตัว) * <input name="password" type="password" minlength="6" required autocomplete="new-password"></label>
+    </div>
+    <button class="btn btn-primary">เพิ่มผู้ใช้</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>ผู้ใช้ทั้งหมด ({{ users|length }})</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ชื่อ</th><th>ชื่อผู้ใช้</th><th>Role</th><th>งาน</th><th>สร้างเมื่อ</th><th></th></tr></thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>{{ u.name }}{% if u.id == user.id %} <small class="muted">(คุณ)</small>{% endif %}</td>
+          <td>{{ u.username }}</td>
+          <td><span class="role role-{{ u.role }}">{{ ROLES[u.role] }}</span></td>
+          <td>{{ u.task_count if u.role == 'employee' else '—' }}</td>
+          <td class="muted nowrap">{{ u.created_at }}</td>
+          <td class="nowrap actions">
+            <details>
+              <summary>แก้ไข</summary>
+              <form method="post" action="{{ url_for('user_update', user_id=u.id) }}" class="inline-edit">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label>ชื่อ <input name="name" value="{{ u.name }}"></label>
+                {% if u.id != user.id %}
+                <label>Role
+                  <select name="role">
+                    {% for k, v in ROLES.items() %}<option value="{{ k }}" {{ 'selected' if u.role == k }}>{{ v }}</option>{% endfor %}
+                  </select>
+                </label>
+                {% endif %}
+                <label>รหัสผ่านใหม่ <input name="password" type="password" minlength="6" placeholder="เว้นว่างถ้าไม่เปลี่ยน" autocomplete="new-password"></label>
+                <button class="btn btn-primary btn-sm">บันทึก</button>
+              </form>
+            </details>
+            {% if u.id != user.id %}
+            <form method="post" action="{{ url_for('user_delete', user_id=u.id) }}" onsubmit='return confirm({{ ("ลบผู้ใช้ " ~ u.name ~ "? งานที่มอบหมายให้คนนี้จะถูกลบด้วย")|tojson }})'>
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <button class="link-danger">ลบ</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
