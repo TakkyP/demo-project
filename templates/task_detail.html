@@ -65,7 +65,8 @@
 {% if user.role == 'employee' and task.assigned_to == user.id and task.status != 'approved' and not task.archived %}
 <div class="card">
   <h2>{% if task.status == 'submitted' %}ส่งรูปเพิ่มเติม{% else %}ถ่ายรูปและส่งงาน{% endif %}</h2>
-  <form method="post" action="{{ url_for('task_upload', task_id=task.id) }}" enctype="multipart/form-data" id="upload-form">
+  <form method="post" action="{{ url_for('task_upload', task_id=task.id) }}" enctype="multipart/form-data"
+        id="upload-form" data-limit-mb="{{ UPLOAD_LIMIT_MB }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="upload-buttons">
       <label class="btn btn-primary">📷 ถ่ายรูป
@@ -76,34 +77,89 @@
       </label>
     </div>
     <div class="preview" id="preview"></div>
+    <p class="muted upload-status" id="upload-status"></p>
     <label>หมายเหตุ (ถ้ามี)
       <textarea name="note" rows="2">{{ task.employee_note }}</textarea>
     </label>
-    <button class="btn btn-success btn-block">ส่งงาน</button>
+    <button class="btn btn-success btn-block" id="submit-btn">ส่งงาน</button>
   </form>
 </div>
 <script>
-  // แสดงตัวอย่างรูปก่อนส่ง และให้ถ่ายรูปหลายครั้งได้ (สร้าง input ใหม่ทุกครั้งที่ถ่าย)
+  // - ย่อรูปในเบราว์เซอร์ก่อนส่ง (ด้านยาวสุด 1600px, JPEG) ให้ไฟล์เล็กและส่งได้เร็ว/ไม่เกินลิมิตของ Vercel
+  // - ถ่ายรูปได้หลายครั้ง (สร้าง input ใหม่ทุกครั้งที่ถ่าย) และแสดงตัวอย่างก่อนส่ง
+  // - กันการกดส่งซ้ำ
   (function () {
+    const MAX_SIDE = 1600, QUALITY = 0.8;
     const form = document.getElementById('upload-form');
     const preview = document.getElementById('preview');
+    const status = document.getElementById('upload-status');
+    const btn = document.getElementById('submit-btn');
+    const limitBytes = Number(form.dataset.limitMb) * 1024 * 1024;
+    let pending = 0;
+
+    async function shrink(file) {
+      try {
+        const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+        const scale = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(bmp.width * scale);
+        canvas.height = Math.round(bmp.height * scale);
+        canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', QUALITY));
+        if (!blob || blob.size >= file.size) return file;  // ย่อแล้วไม่เล็กลง ใช้ไฟล์เดิม
+        return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+      } catch (e) {
+        return file;  // เบราว์เซอร์อ่านไฟล์นี้ไม่ได้ (เช่น HEIC บางเครื่อง) ส่งไฟล์เดิม
+      }
+    }
+
+    function totalSize() {
+      let n = 0;
+      form.querySelectorAll('input[type=file]').forEach(i => { for (const f of i.files) n += f.size; });
+      return n;
+    }
+
+    function refresh() {
+      const mb = (totalSize() / 1024 / 1024).toFixed(1);
+      btn.disabled = pending > 0;
+      status.textContent = pending > 0 ? 'กำลังย่อรูป...' : (totalSize() ? `รวม ${mb} MB` : '');
+    }
+
     function bind(input) {
-      input.addEventListener('change', function () {
+      input.addEventListener('change', async function () {
         if (!input.files.length) return;
-        for (const f of input.files) {
-          const img = document.createElement('img');
-          img.src = URL.createObjectURL(f);
-          preview.appendChild(img);
-        }
         const fresh = input.cloneNode();
         fresh.value = '';
         input.parentNode.appendChild(fresh);
         input.removeAttribute('data-preview');
         form.appendChild(input);  // ย้าย input ที่มีไฟล์แล้วไปเก็บไว้ในฟอร์ม
         bind(fresh);
+
+        pending++; refresh();
+        const dt = new DataTransfer();
+        for (const f of input.files) {
+          const small = await shrink(f);
+          dt.items.add(small);
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(small);
+          preview.appendChild(img);
+        }
+        input.files = dt.files;
+        pending--; refresh();
       });
     }
     form.querySelectorAll('input[data-preview]').forEach(bind);
+
+    form.addEventListener('submit', function (e) {
+      if (pending > 0 || totalSize() > limitBytes) {
+        e.preventDefault();
+        if (totalSize() > limitBytes)
+          alert(`รูปรวมกันใหญ่เกิน ${form.dataset.limitMb} MB ต่อครั้ง กรุณาส่งทีละน้อยรูป แล้วกด "ส่งรูปเพิ่มเติม" อีกรอบ`);
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'กำลังส่ง...';
+    });
   })();
 </script>
 {% endif %}

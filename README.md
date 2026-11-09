@@ -2,7 +2,7 @@
 
 เว็บสำหรับนายจ้างมอบหมายงาน และลูกจ้างถ่ายรูปส่งงานเพื่อให้นายจ้างตรวจ
 
-**เทคโนโลยี:** Python + Flask + SQLite (ไฟล์เดียว ไม่ต้องติดตั้งฐานข้อมูลแยก) — dependency มีแค่ Flask
+**เทคโนโลยี:** Python + Flask · ฐานข้อมูล SQLite (ในเครื่อง) หรือ Postgres (บน Vercel / เซิร์ฟเวอร์จริง) — เลือกอัตโนมัติจาก env `DATABASE_URL`
 
 ## การใช้งาน
 
@@ -33,22 +33,36 @@ python3 -m venv .venv
 
 ## ข้อมูลเก็บที่ไหน
 
-ทั้งหมดอยู่ในโฟลเดอร์ `data/` (สำรองข้อมูล = copy โฟลเดอร์นี้)
+| โหมด | เงื่อนไข | ข้อมูลอยู่ที่ |
+|---|---|---|
+| ในเครื่อง | ไม่ได้ตั้ง `DATABASE_URL` | โฟลเดอร์ `data/` → `worklist.db` (ผู้ใช้ งาน และ**รูป**) — สำรองข้อมูลด้วยการ copy โฟลเดอร์นี้ |
+| Postgres | ตั้ง `DATABASE_URL` (หรือ `POSTGRES_URL`) | ฐานข้อมูล Postgres ทั้งหมด รวมถึงรูป |
 
-- `data/worklist.db` — ฐานข้อมูล SQLite (ผู้ใช้, งาน, รายการรูป)
-- `data/uploads/` — ไฟล์รูป
-- `data/secret.key` — กุญแจ session (สร้างอัตโนมัติ)
+- รูปถูกย่อในเบราว์เซอร์ก่อนส่ง (ด้านยาวสุด 1600px, JPEG) เหลือประมาณ 300–500 KB ต่อรูป และเก็บไว้ในฐานข้อมูล
+- กุญแจ session: ใช้ env `SECRET_KEY` ถ้ามี ไม่งั้นระบบสร้างให้ครั้งเดียวและเก็บไว้ในตาราง `settings`
+- env อื่น: `WORKLIST_DATA=/path` (ที่เก็บโหมดในเครื่อง), `PORT=8000`
 
-เปลี่ยนที่เก็บได้ด้วย env `WORKLIST_DATA=/path/to/data`, เปลี่ยน port ด้วย `PORT=8000`
+## Deploy บน Vercel
 
-## ขึ้นใช้งานจริง
+1. **สร้างฐานข้อมูล:** Vercel → โปรเจกต์ → แท็บ **Storage** → **Create Database** → เลือก **Neon (Postgres)** → Connect กับโปรเจกต์นี้
+   (Vercel จะเพิ่ม env `DATABASE_URL` ให้อัตโนมัติ — ตรวจที่ Settings → Environment Variables)
+2. **ตั้งค่าโปรเจกต์:** Application Preset ปล่อย **Other** ได้ (ไฟล์ `vercel.json` กำหนดให้แล้ว) · Build / Output / Install Command ปล่อยว่าง
+3. **(แนะนำ)** เพิ่ม env `SECRET_KEY` = ข้อความสุ่มยาว ๆ — สร้างด้วย `python3 -c "import secrets; print(secrets.token_hex(32))"`
+4. **Deploy** (หรือ Redeploy ถ้าเพิ่ง connect ฐานข้อมูล) แล้วเปิดเว็บ → หน้า "ตั้งค่าครั้งแรก" → สร้างบัญชีนายจ้าง
+
+ข้อจำกัดบน Vercel
+- ส่งรูปได้รวมไม่เกิน **4 MB ต่อครั้ง** (หลังย่อแล้ว ≈ 8–10 รูป) ถ้าเกิน เว็บจะเตือนให้ส่งทีละน้อยรูป
+- พื้นที่ Neon แพ็กเกจฟรีประมาณ 0.5 GB ≈ 1,000+ รูป — ลบงานถาวร / นำกลับมาใช้ จะคืนพื้นที่ของรูปเก่า
+- ถ้า**ไม่**ตั้ง `DATABASE_URL` บน Vercel ระบบจะเก็บข้อมูลใน `/tmp` ซึ่ง**หายเองเป็นระยะ** ใช้ได้แค่ทดลอง
+
+## ขึ้นใช้งานบนเซิร์ฟเวอร์ของตัวเอง
 
 ```bash
 .venv/bin/pip install gunicorn
 .venv/bin/gunicorn -w 2 -b 0.0.0.0:5050 app:app
 ```
 
-แล้ววาง reverse proxy ที่มี HTTPS ไว้ข้างหน้า (เช่น Caddy หรือ nginx) หรือ deploy บนบริการอย่าง Railway / Render / VPS ที่มี persistent disk สำหรับโฟลเดอร์ `data/`
+แล้ววาง reverse proxy ที่มี HTTPS ไว้ข้างหน้า (เช่น Caddy หรือ nginx) หรือใช้ Railway / Render / VPS ที่มี persistent disk สำหรับ `data/` (หรือตั้ง `DATABASE_URL` ไปที่ Postgres)
 
 ## โครงสร้างโค้ด
 

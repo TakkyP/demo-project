@@ -6,18 +6,25 @@ import uuid
 from datetime import datetime
 from functools import wraps
 
-from flask import (Flask, abort, flash, g, redirect, render_template, request,
+from flask import (Flask, Response, abort, flash, g, redirect, render_template, request,
                    send_from_directory, session, url_for)
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# บน Vercel เขียนไฟล์ได้เฉพาะ /tmp (และข้อมูลใน /tmp ไม่ถาวร — ดู README หัวข้อ Vercel)
+# ฐานข้อมูล: ถ้ามี DATABASE_URL (เช่น Neon/Vercel Postgres) จะใช้ Postgres ไม่งั้นใช้ SQLite ในโฟลเดอร์ data/
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
+USE_PG = bool(DATABASE_URL)
+# บน Vercel เขียนไฟล์ได้เฉพาะ /tmp และไม่ถาวร — ใช้งานจริงบน Vercel ต้องตั้ง DATABASE_URL
 ON_VERCEL = bool(os.environ.get("VERCEL"))
 DATA_DIR = os.environ.get("WORKLIST_DATA") or (
     "/tmp/worklist" if ON_VERCEL else os.path.join(BASE_DIR, "data"))
 DB_PATH = os.path.join(DATA_DIR, "worklist.db")
-UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")  # ใช้กับรูปเก่าที่เก็บเป็นไฟล์ (ก่อนเก็บรูปในฐานข้อมูล)
 ALLOWED_EXT = {"jpg", "jpeg", "png", "gif", "webp", "heic", "heif"}
+MIME = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+        "webp": "image/webp", "heic": "image/heic", "heif": "image/heif"}
+# Vercel รับข้อมูลได้ไม่เกิน 4.5 MB ต่อคำขอ (เบราว์เซอร์จะย่อรูปก่อนส่งให้อยู่แล้ว)
+UPLOAD_LIMIT_MB = 4 if ON_VERCEL else 60
 
 ROLES = {"employer": "นายจ้าง", "employee": "ลูกจ้าง"}
 STATUSES = {
@@ -28,20 +35,18 @@ STATUSES = {
 }
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 60 * 1024 * 1024  # 60 MB ต่อการส่งหนึ่งครั้ง
+app.config["MAX_CONTENT_LENGTH"] = UPLOAD_LIMIT_MB * 1024 * 1024
 
-
-def _secret_key():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    path = os.path.join(DATA_DIR, "secret.key")
-    if not os.path.exists(path):
-        with open(path, "w") as f:
-            f.write(secrets.token_hex(32))
-    with open(path) as f:
-        return f.read().strip()
-
-
-app.secret_key = os.environ.get("SECRET_KEY") or _secret_key()
+USERS_TABLE = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('employer', 'employee')),
+    created_at TEXT NOT NULL
+);
+"""
 
 TASKS_TABLE = """
 CREATE TABLE IF NOT EXISTS {name} (
@@ -63,30 +68,60 @@ CREATE TABLE IF NOT EXISTS {name} (
 );
 """
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('employer', 'employee')),
-    created_at TEXT NOT NULL
-);
+PHOTOS_TABLE = """
 CREATE TABLE IF NOT EXISTS photos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     filename TEXT NOT NULL,
-    uploaded_at TEXT NOT NULL
+    uploaded_at TEXT NOT NULL,
+    mime TEXT,
+    data BLOB  -- ตัวรูป (เก็บในฐานข้อมูล เพื่อให้ใช้บน Vercel ได้) ; NULL = รูปเก่าที่เก็บเป็นไฟล์
+);
+"""
+
+SETTINGS_TABLE = """
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
 
+def _pg_sql(sql):
+    """แปลง SQL แบบ SQLite ให้ใช้กับ Postgres ได้"""
+    return (sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+               .replace(" BLOB", " BYTEA"))
+
+
 # ---------------------------------------------------------------- database
+class Database:
+    """ตัวกลางเล็ก ๆ ให้โค้ดเดียวกันใช้ได้ทั้ง SQLite และ Postgres (ใช้ ? เป็น placeholder ได้ทั้งคู่)"""
+
+    def __init__(self):
+        if USE_PG:
+            import psycopg
+            from psycopg.rows import dict_row
+            self.conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        else:
+            self.conn = sqlite3.connect(DB_PATH)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def execute(self, sql, params=()):
+        if USE_PG:
+            sql = sql.replace("?", "%s")
+        return self.conn.execute(sql, params)
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = Database()
     return g.db
 
 
@@ -102,15 +137,24 @@ TASK_COLS = ("id, title, description, location, assigned_to, created_by, due_dat
 
 
 def init_db():
+    if USE_PG:
+        import psycopg
+        with psycopg.connect(DATABASE_URL) as conn:
+            conn.execute(_pg_sql(USERS_TABLE + TASKS_TABLE.format(name="tasks") + PHOTOS_TABLE + SETTINGS_TABLE))
+        return
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript(SCHEMA + TASKS_TABLE.format(name="tasks"))
+        conn.executescript(USERS_TABLE + TASKS_TABLE.format(name="tasks") + PHOTOS_TABLE + SETTINGS_TABLE)
         # migration: เพิ่มคอลัมน์ให้ฐานข้อมูลเดิมที่สร้างก่อนมีฟีเจอร์นั้น
         cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
         if "location" not in cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN location TEXT NOT NULL DEFAULT ''")
         if "archived" not in cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+        photo_cols = {r[1] for r in conn.execute("PRAGMA table_info(photos)")}
+        if "data" not in photo_cols:
+            conn.execute("ALTER TABLE photos ADD COLUMN mime TEXT")
+            conn.execute("ALTER TABLE photos ADD COLUMN data BLOB")
         # migration: ฐานข้อมูลเดิมบังคับ assigned_to NOT NULL -> สร้างตารางใหม่ให้รองรับ "ทุกคน"
         notnull = {r[1]: r[3] for r in conn.execute("PRAGMA table_info(tasks)")}
         if notnull.get("assigned_to"):
@@ -122,6 +166,20 @@ def init_db():
                 + f"INSERT INTO tasks_new ({TASK_COLS}) SELECT {TASK_COLS} FROM tasks;"
                 "DROP TABLE tasks; ALTER TABLE tasks_new RENAME TO tasks; COMMIT;"
             )
+
+
+def _secret_key():
+    """ใช้ SECRET_KEY จาก env ถ้ามี ไม่งั้นสร้างครั้งเดียวแล้วเก็บไว้ในฐานข้อมูล (ทุกเครื่องบน Vercel ใช้ค่าเดียวกัน)"""
+    if os.environ.get("SECRET_KEY"):
+        return os.environ["SECRET_KEY"]
+    d = Database()
+    try:
+        d.execute("INSERT INTO settings (key, value) VALUES ('secret_key', ?) ON CONFLICT (key) DO NOTHING",
+                  (secrets.token_hex(32),))
+        d.commit()
+        return d.execute("SELECT value FROM settings WHERE key = 'secret_key'").fetchone()["value"]
+    finally:
+        d.close()
 
 
 def now():
@@ -162,7 +220,8 @@ def csrf_protect():
 def inject_globals():
     if "csrf" not in session:
         session["csrf"] = secrets.token_hex(16)
-    return {"user": current_user(), "csrf": session["csrf"], "ROLES": ROLES, "STATUSES": STATUSES}
+    return {"user": current_user(), "csrf": session["csrf"], "ROLES": ROLES, "STATUSES": STATUSES,
+            "UPLOAD_LIMIT_MB": UPLOAD_LIMIT_MB}
 
 
 def fetch_task(task_id):
@@ -287,7 +346,8 @@ def task_detail(task_id):
             flash("มีคนอื่นรับงานนี้ไปแล้ว", "error")
             return redirect(url_for("tasks"))
     task = fetch_task(task_id)
-    photos = db().execute("SELECT * FROM photos WHERE task_id = ? ORDER BY id", (task_id,)).fetchall()
+    photos = db().execute("SELECT id, task_id, filename, uploaded_at FROM photos WHERE task_id = ? ORDER BY id",
+                          (task_id,)).fetchall()
     return render_template("task_detail.html", task=task, photos=photos, tab="tasks")
 
 
@@ -330,9 +390,9 @@ def task_upload(task_id):
             flash(f"ข้ามไฟล์ {f.filename}: รองรับเฉพาะไฟล์รูปภาพ", "error")
             continue
         name = f"{task_id}_{uuid.uuid4().hex}.{ext}"
-        f.save(os.path.join(UPLOAD_DIR, name))
-        db().execute("INSERT INTO photos (task_id, filename, uploaded_at) VALUES (?,?,?)",
-                     (task_id, name, now()))
+        # เก็บตัวรูปในฐานข้อมูล (ใช้ได้ทั้งในเครื่องและบน Vercel ซึ่งไม่มีดิสก์ถาวร)
+        db().execute("INSERT INTO photos (task_id, filename, uploaded_at, mime, data) VALUES (?,?,?,?,?)",
+                     (task_id, name, now(), MIME.get(ext, "application/octet-stream"), f.read()))
         saved += 1
 
     has_photos = saved or db().execute("SELECT 1 FROM photos WHERE task_id = ?", (task_id,)).fetchone()
@@ -352,7 +412,7 @@ def task_upload(task_id):
 @app.route("/photos/<int:photo_id>/delete", methods=["POST"])
 @login_required()
 def photo_delete(photo_id):
-    photo = db().execute("SELECT * FROM photos WHERE id = ?", (photo_id,)).fetchone()
+    photo = db().execute("SELECT id, task_id, filename FROM photos WHERE id = ?", (photo_id,)).fetchone()
     if not photo:
         abort(404)
     task = fetch_task(photo["task_id"])
@@ -373,7 +433,11 @@ def photo_file(photo_id):
     if not photo:
         abort(404)
     fetch_task(photo["task_id"])  # ตรวจสิทธิ์
-    return send_from_directory(UPLOAD_DIR, photo["filename"])
+    if photo["data"] is None:  # รูปเก่าที่เก็บเป็นไฟล์
+        return send_from_directory(UPLOAD_DIR, photo["filename"])
+    resp = Response(bytes(photo["data"]), mimetype=photo["mime"] or "image/jpeg")
+    resp.headers["Cache-Control"] = "private, max-age=86400"  # รูปไม่เปลี่ยน ให้เบราว์เซอร์เก็บไว้
+    return resp
 
 
 # ---------- นายจ้าง: ตรวจงาน
@@ -597,11 +661,12 @@ def _remove_file(filename):
 
 @app.errorhandler(413)
 def too_large(_e):
-    flash("ไฟล์รวมใหญ่เกินไป (สูงสุด 60 MB ต่อครั้ง) ลองส่งทีละน้อยรูป", "error")
+    flash(f"ไฟล์รวมใหญ่เกินไป (สูงสุด {UPLOAD_LIMIT_MB} MB ต่อครั้ง) ลองส่งทีละน้อยรูป", "error")
     return redirect(request.referrer or url_for("tasks"))
 
 
 init_db()
+app.secret_key = _secret_key()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5050)), debug=os.environ.get("DEBUG") == "1")
