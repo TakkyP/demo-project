@@ -10,7 +10,7 @@
 {% if user %}
 <header class="topbar">
   <div class="wrap topbar-inner">
-    <a class="brand" href="{{ url_for('tasks') }}">✓ Worklist</a>
+    <a class="brand" href="{{ url_for('tasks') }}">TD ✓</a>
     <div class="who">
       <a class="who-name {{ 'active' if tab == 'account' }}" href="{{ url_for('account') }}" title="เปลี่ยนรหัสผ่าน">🔑 {{ user.name }} <small class="role role-{{ user.role }}">{{ ROLES[user.role] }}</small></a>
       <form method="post" action="{{ url_for('logout') }}">
